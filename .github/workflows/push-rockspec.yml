@@ -22,7 +22,7 @@ jobs:
     - name: Set env
       run: echo "TAG=${GITHUB_REF#refs/*/}" >> $GITHUB_ENV
 
-    - run: tarantoolctl rocks new_version --tag=${{ env.TAG }} rockspecs/luabench-scm-1.rockspec ${{ env.TAG }} "git+https://github.com/${{ github.repository }}.git"
+    - run: tarantoolctl rocks new_version --tag=${{ env.TAG }} luabench-scm-1.rockspec ${{ env.TAG }} "git+https://github.com/${{ github.repository }}.git"
     - run: tarantoolctl rocks --server https://moonlibs.github.io/rocks install ${{ env.ROCK_NAME }}-${{ env.TAG }}-1.rockspec
     - run: tarantoolctl rocks pack ${{ env.ROCK_NAME }}-${{ env.TAG }}-1.rockspec
     # Install native lua with luarocks
@@ -33,7 +33,7 @@ jobs:
       with:
         luarocksVersion: "3.8.0"
     - uses: unfor19/install-aws-cli-action@v1.0.3
-    - run: mkdir .build && cp ${{env.ROCK_NAME}}-dev-1.rockspec ${{env.ROCK_NAME}}-${{env.TAG}}-1.rockspec .build/ && cp *.src.rock .build/
+    - run: mkdir .build && cp ${{env.ROCK_NAME}}-scm-1.rockspec ${{env.ROCK_NAME}}-${{env.TAG}}-1.rockspec .build/ && cp *.src.rock .build/
     - name: rebuild and publish s3 luarocks server
       env:
         AWS_ACCESS_KEY_ID: ${{ secrets.MOONLIBS_S3_ACCESS_KEY_ID }}
