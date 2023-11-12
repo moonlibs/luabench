@@ -1,0 +1,20 @@
+name: Run unit tests
+
+on:
+  push:
+
+env:
+  ROCK_NAME: luabench
+
+jobs:
+  run-luacheck:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@master
+    - uses: tarantool/setup-tarantool@v2
+      with:
+        tarantool-version: '2.10.7'
+    - name: install luacheck 0.26.0
+      run: tarantoolctl rocks install luacheck 0.26.0
+    - name: run luacheck
+      run: .rocks/bin/luacheck .
