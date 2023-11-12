@@ -11,12 +11,18 @@
 - **Output Format:** Benchmark results are output to stdout in the same format as Go's `testing/benchmark`.
 - **Skipping and Failing Benchmarks:** Users can skip a benchmark by calling `b:skip("<skip-reason>")` or fail a benchmark using `b:fail("<fail-reason>")`.
 
+## Status
+
+Early proof-of-concept
+
+Latest release: `0.1.0`
+
 ## Installation
 
 **Via Tarantool Rocks:**
 
 ```bash
-tt rocks --server https://moonlibs.org install luabench
+tt rocks --server https://moonlibs.org install luabench 0.1.0
 ```
 
 **Manual Download:**
