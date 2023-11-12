@@ -1,6 +1,6 @@
 # luabench
 
-**luabench** is a benchmarking tool designed for unit benchmarking of Lua modules in Tarantool. It draws inspiration from Go's `testing/bench`, bringing similar functionality to the Lua ecosystem. With luabench, you can easily measure and analyze the performance of your Lua code.
+**luabench** is a benchmarking tool designed for unit benchmarking of Lua modules in Tarantool. It draws inspiration from Go's `testing/benchmark`, bringing similar functionality to the Lua ecosystem. With luabench, you can easily measure and analyze the performance of your Lua code.
 
 ## Features and Capabilities
 
@@ -8,7 +8,7 @@
 - **Customizable Duration and Iterations:** Specify the benchmark duration (`-d`) in seconds (e.g., `-d 10s`) or iterations (e.g., `-d 1000x`).
 - **Sequential Execution:** Each benchmark function is executed in a separate fiber sequentially, not concurrently.
 - **Performance Metrics:** Reports the average time per operation and average operations per second, along with total allocated memory for each benchmark test.
-- **Output Format:** Benchmark results are output to stdout in the same format as Go's `testing/bench`.
+- **Output Format:** Benchmark results are output to stdout in the same format as Go's `testing/benchmark`.
 - **Skipping and Failing Benchmarks:** Users can skip a benchmark by calling `b:skip("<skip-reason>")` or fail a benchmark using `b:fail("<fail-reason>")`.
 
 ## Installation
