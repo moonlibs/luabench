@@ -523,13 +523,14 @@ local function cpu_info()
 	elseif jit.os == 'Linux' then
 		local file = io.open('/proc/cpuinfo', 'r')
 		if file then
-			local cpu_model, cpu_mhz
+			local cpu_model, cpu_mhz = '', ''
 			for line in file:lines() do
 				if line:find(':') then
 					local name, value = unpack(line:split(": "))
-					if name:lower() == 'model name' then
+					name = name:rstrip():lower()
+					if name == 'model name' then
 						cpu_model = value
-					elseif name:lower() == 'cpu mhz' then
+					elseif name == 'cpu mhz' then
 						cpu_mhz = value
 					end
 				end
@@ -539,7 +540,7 @@ local function cpu_info()
 				if cpu_mhz == '' or cpu_model:find('MHz') or cpu_model:find('GHz') then
 					cpu_name = cpu_model
 				else
-					cpu_name = cpu_model .. ' @ ' .. cpu_mhz .. cpu_mhz .. 'MHz'
+					cpu_name = cpu_model .. ' @ ' .. cpu_mhz .. 'MHz'
 				end
 			end
 		end
