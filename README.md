@@ -15,14 +15,14 @@
 
 Early proof-of-concept
 
-Latest release: `0.1.0`
+Latest release: `0.1.1`
 
 ## Installation
 
 **Via Tarantool Rocks:**
 
 ```bash
-tt rocks --server https://moonlibs.org install luabench 0.1.0
+tt rocks --server https://moonlibs.org install luabench 0.1.1
 ```
 
 **Manual Download:**

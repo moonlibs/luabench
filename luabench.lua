@@ -404,6 +404,8 @@ local M = {
 	after_all_triggers = {},
 }
 
+M._VERSION = '0.1.1'
+
 function M.before_all(func)
 	table.insert(M.before_all_triggers, func)
 end
@@ -660,6 +662,10 @@ if not mod_name or not mod_name:endswith("luabench") then
 	parser:flag "-v" "--verbose"
 		:target "verbose"
 		:description "Increase verbosity"
+
+	parser:flag "--version"
+		:description "Prints version"
+		:action(function() print("luabench " .. M._VERSION) os.exit(0) end)
 
 	parser:argument "path"
 		:target "path"
