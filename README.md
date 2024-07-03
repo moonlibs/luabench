@@ -74,7 +74,8 @@ return M
 ### Command Line Usage
 
 ```bash
-Usage: luabench [-v] [-d <d>] [-h] [<path>]
+Usage: luabench [-v] [--version] [--bmf] [-j <j>] [--no-preambule]
+       [-d <d>] [-h] [<path>]
 
 Runs lua code benchmarks
 
@@ -83,7 +84,11 @@ Arguments:
 
 Options:
    -v, --verbose         Increase verbosity
-   -d <d>                Test duration limit
+   --version             Prints version
+   --bmf                 Reports benchmark in BMF format
+   -j <j>                Ons or Offs jit
+   --no-preambule        Hides preambule
+   -d <d>                test duration limit
    -h, --help            Show this help message and exit.
 ```
 
@@ -91,21 +96,78 @@ Options:
 
 ```bash
 .rocks/bin/luabench -d 100x examples/001_bench.lua
-Tarantool version: 2.11.1-0-g96877bd
-Tarantool build: Darwin-arm64-RelWithDebInfo
-CPU: Apple M1 @ 8
+Tarantool version: Tarantool 3.1.0-0-g96f6d88
+Tarantool build: Darwin-x86_64-Release (dynamic)
+Tarantool build flags:  -fexceptions -funwind-tables -fasynchronous-unwind-tables -fno-common -msse2 -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -fPIC -fmacro-prefix-map=/tmp/tarantool-20240417-5649-53mktp/tarantool-3.1.0=. -std=c11 -Wall -Wextra -Wno-gnu-alignof-expression -Wno-cast-function-type -O3 -DNDEBUG
+CPU: Apple M2 Pro @ 10
 JIT: Disabled
 Duration: 100 iters
 
---- SKIP:  001_bench::bench_insert:local-table
+--- SKIP:  001_bench::bench_insert:local-table: no local-table
 
 --- BENCH: 001_bench::bench_insert:rewrite-1000
-     100                30.00 ns/op       33333333 op/s       38 B/op   +3.72KB
+     100                50.00 ns/op       20000000 op/s       29 B/op   +2.92KB
 
 --- BENCH: 001_bench::bench_insert:temporary-space
-     100               410.0 ns/op         2439024 op/s       91 B/op   +8.96KB
+     100              1100 ns/op            909091 op/s      126 B/op   +12.34KB
 
---- SKIP:  001_bench::bench_sum
+--- SKIP:  001_bench::bench_sum: no summing for today
+```
+
+### Enabling/Disabling JIT
+
+You may specify `-jon` or `-joff` to enable or disable jit by force
+
+```bash
+.rocks/bin/luabench -jon -d 100x examples/001_bench.lua
+Tarantool version: Tarantool 3.1.0-0-g96f6d88
+Tarantool build: Darwin-x86_64-Release (dynamic)
+Tarantool build flags:  -fexceptions -funwind-tables -fasynchronous-unwind-tables -fno-common -msse2 -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -fPIC -fmacro-prefix-map=/tmp/tarantool-20240417-5649-53mktp/tarantool-3.1.0=. -std=c11 -Wall -Wextra -Wno-gnu-alignof-expression -Wno-cast-function-type -O3 -DNDEBUG
+CPU: Apple M2 Pro @ 10
+JIT: Enabled
+JIT: SSE2 SSE3 SSE4.1 fold cse dce fwd dse narrow loop abc sink fuse
+Duration: 100 iters
+
+--- SKIP:  001_bench::bench_insert:local-table: no local-table
+
+--- BENCH: 001_bench::bench_insert:rewrite-1000
+     100             14270 ns/op             70077 op/s       36 B/op   +3.56KB
+
+--- BENCH: 001_bench::bench_insert:temporary-space
+     100              9340 ns/op            107066 op/s      149 B/op   +14.62KB
+
+--- SKIP:  001_bench::bench_sum: no summing for today
+```
+
+### Bencher support
+
+With flag `--bmf` `luabench` prints out to stdout Benchmark results in Bencher Json format.
+
+```bash
+.rocks/bin/luabench --bmf -d 100x examples/001_bench.lua
+Tarantool version: Tarantool 3.1.0-0-g96f6d88
+Tarantool build: Darwin-x86_64-Release (dynamic)
+Tarantool build flags:  -fexceptions -funwind-tables -fasynchronous-unwind-tables -fno-common -msse2 -Wformat -Wformat-security -Werror=format-security -fstack-protector-strong -fPIC -fmacro-prefix-map=/tmp/tarantool-20240417-5649-53mktp/tarantool-3.1.0=. -std=c11 -Wall -Wextra -Wno-gnu-alignof-expression -Wno-cast-function-type -O3 -DNDEBUG
+CPU: Apple M2 Pro @ 10
+JIT: Disabled
+Duration: 100 iters
+
+--- SKIP:  001_bench::bench_insert:local-table: no local-table
+
+--- BENCH: 001_bench::bench_insert:rewrite-1000
+     100                50.00 ns/op       20000000 op/s       29 B/op   +2.92KB
+
+--- BENCH: 001_bench::bench_insert:temporary-space
+     100              1090 ns/op            917431 op/s      126 B/op   +12.34KB
+
+--- SKIP:  001_bench::bench_sum: no summing for today
+{"001_bench::bench_insert:temporary-space":{"latency":{"value":1090},"throughput":{"value":917431},"net_bytes":{"value":126}},"001_bench::bench_insert:rewrite-1000":{"latency":{"value":50},"throughput":{"value":20000000},"net_bytes":{"value":29}}}
+```
+
+With [bencher](https://bencher.dev/) you may run luabench as follows:
+
+```bash
+bencher run --project <PROJECT> --adapter json '.rocks/bin/luabench -d 1000x --bmf examples/001_bench.lua'
 ```
 
 ## Dependencies

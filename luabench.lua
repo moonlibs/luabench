@@ -1,4 +1,5 @@
 #!/usr/bin/env tarantool
+local json = require 'json'
 local fio = require 'fio'
 local log = {
 	info = function(...)
@@ -36,11 +37,64 @@ local err_skip = box.error.new({ code = 0x02, type = 'LuaBenchError', reason = '
 
 ---@class luabench.B
 ---@field N number
+---@field name string
 ---@field run fun(self: luabench.B, name: string, func: fun(b: luabench.B))
+---@field fail fun(self: luabench.B) immediately fail benchmark
+---@field fatal fun(self: luabench.B, log_message: any?) fail benchmark with log message
+---@field skip fun(self: luabench.B, skip_reason: any?) skip benchmark with reason
+---@field package run1 fun(self: luabench.B): boolean
+---@field package do_bench fun(self: luabench.B): table?
+---@field package is_failed fun(self: luabench.B): boolean, string?
+---@field package is_skipped fun(self: luabench.B): boolean, string?
+---@field package set_bench_time fun(self: luabench.B, bt: luabench.bench_time)
 
 ---@class luabench.bench_time
 ---@field iters? number
 ---@field seconds? number
+
+---@class luabench.R
+---@field duration number in nanoseconds
+---@field N number performed iterations
+---@field net_bytes number bytes allocated
+
+
+---@type table<string, {report: fun(self: any, b: luabench.B, r: luabench.R), finish: fun(self: any)}>
+local reporters; reporters = {
+	plain = {
+		report = function(_, b, r)
+			if b:is_failed() then
+				log.error("\n--- FAIL:  %s: %s", b.name, select(2, b:is_failed()))
+			elseif b:is_skipped() then
+				log.warn ("\n--- SKIP:  %s: %s", b.name, select(2, b:is_skipped()))
+			elseif r then
+				log.info ("\n--- BENCH: %s\n%s", b.name, tostring(r))
+			end
+		end,
+		finish = function() end,
+	},
+	bmf = {
+		stack = {},
+		report = function(self, b, r)
+			if b:is_failed() then
+				log.error("\n--- FAIL:  %s: %s", b.name, select(2, b:is_failed()))
+			elseif b:is_skipped() then
+				log.warn ("\n--- SKIP:  %s: %s", b.name, select(2, b:is_skipped()))
+			elseif r and r.duration ~= 0 then
+				log.warn ("\n--- BENCH: %s\n%s", b.name, tostring(r))
+				self.stack[b.name] = {
+					latency    = { value = math.floor(tonumber(tonumber(r.duration) / r.N)) },
+					throughput = { value = math.floor(tonumber(r.N*1e9 / tonumber(r.duration))) },
+					net_bytes  = { value = math.floor(tonumber(tonumber(r.net_bytes) / r.N)) },
+				}
+			end
+		end,
+		finish = function(self)
+			log.info(json.encode(self.stack))
+		end
+	},
+}
+
+local reporter = reporters.plain
 
 ---@param name string
 ---@param func fun(b: luabench.B)
@@ -133,9 +187,14 @@ local function newB(name, func, bench_time)
 	local benchN = name
 	local benchF = func
 
-	local function runN(self, n)
+	local function runN(self, n, dur)
 		fiber.self():set_joinable(true)
 		self.N = n
+
+		if dur and fiber.extend_slice then
+			fiber.extend_slice({ err = 2*dur, warn = dur })
+		end
+
 		rungc()
 
 		reset_timer(self)
@@ -145,8 +204,13 @@ local function newB(name, func, bench_time)
 
 		self.prev_n = n
 		self.prev_duration = duration
+
+		if fiber.check_slice then
+			fiber.check_slice()
+		end
 	end
 
+	---@param self luabench.B
 	---@return boolean should_continue
 	local function run1(self)
 		local fib = fiber.create(runN, self, 1)
@@ -225,6 +289,7 @@ local function newB(name, func, bench_time)
 		end
 	end
 
+	---@type luabench.R
 	local result = setmetatable({}, {
 		__tostring = function(self)
 			local t = {}
@@ -282,14 +347,7 @@ local function newB(name, func, bench_time)
 			res = sub:do_bench()
 		end
 
-		if sub:is_failed() then
-			log.error("\n--- FAIL:  %s: %s", fullname, select(2, sub:is_failed()))
-		elseif sub:is_skipped() then
-			log.warn ("\n--- SKIP:  %s: %s", fullname, select(2, sub:is_skipped()))
-		elseif res then
-			log.info ("\n--- BENCH: %s\n%s", fullname, tostring(res))
-		end
-
+		reporter:report(sub, res)
 		return not sub:is_failed()
 	end
 
@@ -315,10 +373,10 @@ local function newB(name, func, bench_time)
 			end
 		else
 			local d = bench_time.seconds*1e9
+			local goalns = d
 			local n = 1LL
 			while not failed and duration < d and n < 1e9 do
 				local last = n
-				local goalns = d
 				local prev_iters = self.N
 				local prev_ns = duration
 				-- print(duration, d, n, self.N)
@@ -333,7 +391,10 @@ local function newB(name, func, bench_time)
 				n = max(n, last+1)
 				n = min(n, 1e9)
 
-				runN(self, tonumber(n))
+				runN(self,
+					tonumber(n),
+					tonumber(prev_ns * (tonumber(n) / tonumber(prev_iters))) / 1e9
+				)
 			end
 			-- print(duration, failed, d, n)
 		end
@@ -359,6 +420,7 @@ local function newB(name, func, bench_time)
 		if not success then
 			log.error("Benchmark failed: %s", err)
 			failed = true
+			fail_reason = tostring(err)
 			return nil
 		end
 
@@ -372,8 +434,10 @@ local function newB(name, func, bench_time)
 		bench_time = bt
 	end
 
-	return {
+	---@type luabench.B
+	local B = {
 		N = 0,
+		name = name,
 
 		skip = skip,
 		fail = fail,
@@ -394,6 +458,7 @@ local function newB(name, func, bench_time)
 		-- private
 		get_result = get_result,
 	}
+	return B
 end
 
 --- Default global benchmark context
@@ -404,7 +469,7 @@ local M = {
 	after_all_triggers = {},
 }
 
-M._VERSION = '0.1.1'
+M._VERSION = '0.2.0'
 
 function M.before_all(func)
 	table.insert(M.before_all_triggers, func)
@@ -481,14 +546,10 @@ local function load_benchmark_file(file)
 
 	-- now we traverse module-table to find 'bench_' function
 	local funcs = {}
-	local max_name_size = 0
 	for name, func in pairs(module) do
 		if type(name) == 'string' and name:startswith('bench_') then
 			if type(func) == 'function' then
 				table.insert(funcs, name)
-				if max_name_size < #name then
-					max_name_size = #name
-				end
 			end
 		end
 	end
@@ -503,7 +564,6 @@ local function load_benchmark_file(file)
 		file = file,
 		module = module,
 		funcs = funcs,
-		max_name_size = max_name_size,
 	}
 end
 
@@ -574,7 +634,6 @@ local function run(args)
 	-- now filter files with suffix '_bench.lua'
 	-- and perform init/load phase (it might fail)
 	local files = {}
-	local max_name_size = 0
 	local benchmarks = {}
 	for _, file in ipairs(tree) do
 		if file:endswith('_bench.lua') then
@@ -582,11 +641,6 @@ local function run(args)
 			if err == nil then
 				table.insert(files, file)
 				benchmarks[file] = load_benchmark_file(file)
-
-				local mns = benchmarks[file].max_name_size
-				if max_name_size < mns then
-					max_name_size = mns
-				end
 			else
 				log.error(err)
 			end
@@ -606,29 +660,34 @@ local function run(args)
 	end
 
 	-- print-out preambule
-	do
+	if not args.no_preambule then
 		local tarantool = require 'tarantool'
-		log.info("Tarantool version: %s", tarantool.version)
-		log.info("Tarantool build: %s", tarantool.build.target)
+		log.warn("Tarantool version: %s %s", tarantool.package, tarantool.version)
+		log.warn("Tarantool build: %s (%s)", tarantool.build.target, tarantool.build.linking)
+		log.warn("Tarantool build flags: %s", tarantool.build.flags)
 
 		local cpu_name = cpu_info()
 		if cpu_name then
-			log.info("CPU: %s", cpu_name)
+			log.warn("CPU: %s", cpu_name)
 		end
 
 		local jits = { jit.status() }
 		local jit_enabled = table.remove(jits, 1)
-		log.info("JIT: %s", jit_enabled and "Enabled" or "Disabled")
+		log.warn("JIT: %s", jit_enabled and "Enabled" or "Disabled")
 		if jit_enabled then
-			log.info("JIT: %s", table.concat(jits, " "))
+			log.warn("JIT: %s", table.concat(jits, " "))
 		end
-		log.info("Duration: %s",
+		log.warn("Duration: %s",
 			args.duration.seconds and ("%ss"):format(args.duration.seconds)
 				or ("%s iters"):format(args.duration.iters)
 		)
 	end
 
 	gbctx:set_bench_time(args.duration)
+	if args.bmf then
+		reporter = reporters.bmf
+		table.insert(M.after_all_triggers, 1, function() reporter:finish()  end)
+	end
 
 	for _, file in ipairs(files) do
 		local bench_file = benchmarks[file]
@@ -673,6 +732,24 @@ if not mod_name or not mod_name:endswith("luabench") then
 		:default(".")
 		:description "Run benchmark from specified paths"
 
+	parser:flag "--bmf"
+		:target "bmf"
+		:description "Reports benchmark in BMF format"
+
+	parser:option "-j"
+		:target "jit"
+		:args "1"
+		:description "Ons or Offs jit"
+		:action(function(_, _,opt)
+			if opt == 'on' then
+				jit.on()
+			elseif opt == 'off' then
+				jit.off()
+				jit.flush()
+				collectgarbage('collect')
+			end
+		end)
+
 	parser:flag "--memprof"
 		:target "run_memprof"
 		:hidden(true)
@@ -682,6 +759,10 @@ if not mod_name or not mod_name:endswith("luabench") then
 		:target "run_sysprof"
 		:hidden(true)
 		:description "run cpu profile"
+
+	parser:flag "--no-preambule"
+		:target "no_preambule"
+		:description "Hides preambule"
 
 	parser:flag "--description"
 		:hidden(true)
