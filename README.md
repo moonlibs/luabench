@@ -15,7 +15,7 @@
 
 Early proof-of-concept
 
-Latest release: `0.1.1`
+Latest release: `0.2.0`
 
 ## Installation
 
