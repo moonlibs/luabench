@@ -39,6 +39,7 @@ local err_skip = box.error.new({ code = 0x02, type = 'LuaBenchError', reason = '
 ---@field N number
 ---@field name string
 ---@field run fun(self: luabench.B, name: string, func: fun(b: luabench.B))
+---@field set_bytes fun(self: luabench.B, bytes: number)
 ---@field fail fun(self: luabench.B) immediately fail benchmark
 ---@field fatal fun(self: luabench.B, log_message: any?) fail benchmark with log message
 ---@field skip fun(self: luabench.B, skip_reason: any?) skip benchmark with reason
@@ -56,12 +57,73 @@ local err_skip = box.error.new({ code = 0x02, type = 'LuaBenchError', reason = '
 ---@field duration number in nanoseconds
 ---@field N number performed iterations
 ---@field net_bytes number bytes allocated
+---@field bytes number bytes set by benchmark
+---@field runs luabench.R[] recorded runs of benchmark
 
+---@param runs luabench.R[]
+---@param func fun(luabench.R):number
+local statistics = function(runs, func)
+	---@type number[]
+	local values = {}
+	local result = {
+		max = 0,
+		min = math.huge,
+		avg = nil,
+		len = #runs,
+		values = values,
+	}
+	for _, run in ipairs(runs) do
+		local value = func(run)
+		table.insert(values, value)
+	end
+	table.sort(values)
+
+	local n = #values
+	-- exclude ≤10% and ≥90% of values
+	local tenth = math.ceil(n*0.1)
+	for _ = 1, tenth do
+		table.remove(values, 1)
+		table.remove(values)
+	end
+
+	result.min = values[1]
+	result.max = values[1]
+
+	if #values == 0 then
+		return result
+	end
+
+	local sum = 0
+	for _, value in ipairs(values) do
+		if value > result.max then
+			result.max = value
+		end
+		if value < result.min then
+			result.min = value
+		end
+		sum = sum + value
+	end
+	result.avg = sum / #values
+	local stdev = 0
+	for _, value in ipairs(values) do
+		stdev = stdev + math.abs(value - result.avg)^2
+	end
+	result.stdev = math.sqrt(stdev / #values)
+	if result.avg ~= 0 then
+		result.stdev_pct = (result.stdev / result.avg)*100
+	else
+		result.stdev_pct = (result.stdev / 1.0)*100
+	end
+	result.lower_value = result.min
+	result.upper_value = result.max
+	return result
+end
 
 ---@type table<string, {report: fun(self: any, b: luabench.B, r: luabench.R), finish: fun(self: any)}>
 local reporters; reporters = {
 	plain = {
 		report = function(_, b, r)
+			---@cast r luabench.R
 			if b:is_failed() then
 				log.error("\n--- FAIL:  %s: %s", b.name, select(2, b:is_failed()))
 			elseif b:is_skipped() then
@@ -75,17 +137,33 @@ local reporters; reporters = {
 	bmf = {
 		stack = {},
 		report = function(self, b, r)
+			---@cast r luabench.R
 			if b:is_failed() then
 				log.error("\n--- FAIL:  %s: %s", b.name, select(2, b:is_failed()))
 			elseif b:is_skipped() then
 				log.warn ("\n--- SKIP:  %s: %s", b.name, select(2, b:is_skipped()))
 			elseif r and r.duration ~= 0 then
 				log.warn ("\n--- BENCH: %s\n%s", b.name, tostring(r))
-				self.stack[b.name] = {
-					latency    = { value = math.floor(tonumber(tonumber(r.duration) / r.N)) },
-					throughput = { value = math.floor(tonumber(r.N*1e9 / tonumber(r.duration))) },
-					net_bytes  = { value = math.floor(tonumber(tonumber(r.net_bytes) / r.N)) },
+
+				local stats = {
+					latency = statistics(r.runs, function(run)
+						return math.floor(tonumber(tonumber(run.duration) / run.N))
+					end),
+					throughput = statistics(r.runs, function(run)
+						return math.floor(tonumber(run.N*1e9 / tonumber(run.duration)))
+					end),
+					net_bytes = statistics(r.runs, function(run)
+						return math.floor(tonumber(tonumber(run.net_bytes) / run.N))
+					end),
+					bytes = statistics(r.runs, function(run)
+						return math.floor(tonumber(tonumber(run.bytes or 0) / run.N))
+					end),
 				}
+				stats.latency.value = math.floor(tonumber(tonumber(r.duration) / r.N))
+				stats.throughput.value = math.floor(tonumber(r.N*1e9 / tonumber(r.duration)))
+				stats.net_bytes.value = math.floor(tonumber(tonumber(r.net_bytes) / r.N))
+				stats.bytes.value = math.floor(tonumber(tonumber(r.bytes or 0) / r.N))
+				self.stack[b.name] = stats
 			end
 		end,
 		finish = function(self)
@@ -95,6 +173,53 @@ local reporters; reporters = {
 }
 
 local reporter = reporters.plain
+
+local get_global_timeout, set_global_timeout do
+	local global_timeout = 60
+
+	function get_global_timeout() return global_timeout end
+	function set_global_timeout(t) global_timeout = t end
+end
+
+---@param x number
+---@param unit string
+local function pretty(x, unit)
+	local y = math.abs(tonumber(x))
+
+	local format
+	if y == 0 or y >= 999.95 then
+		format = '%10.0f %s'
+	elseif y >= 99.995 then
+		format = '%12.1f %s'
+	elseif y >= 9.9995 then
+		format = '%13.2f %s'
+	elseif y >= 0.99995 then
+		format = '%14.3f %s'
+	elseif y >= 0.099995 then
+		format = '%15.4f %s'
+	elseif y >= 0.0099995 then
+		format = '%16.5f %s'
+	elseif y >= 0.00099995 then
+		format = '%17.6f %s'
+	else
+		format = '%18.7f %s'
+	end
+
+	return string.format(format, x, unit)
+end
+
+---@param b number
+---@return string
+local function pretty_mem(b)
+	local sign = b > 0 and "+" or ""
+	if b > 2^20 then
+		return ("%s%.2fMB"):format(sign, b / 2^20)
+	elseif b > 2^10 then
+		return ("%s%.2fKB"):format(sign, b / 2^10)
+	else
+		return ("%s%dB"):format(sign, b)
+	end
+end
 
 ---@param name string
 ---@param func fun(b: luabench.B)
@@ -109,13 +234,9 @@ local function newB(name, func, bench_time)
 
 	local has_sub = false
 
-	local function is_failed()
-		return failed, fail_reason
-	end
+	local function is_failed() return failed, fail_reason end
 
-	local function is_skipped()
-		return skipped, skip_reason
-	end
+	local function is_skipped() return skipped, skip_reason end
 
 	local function skip(_, ...)
 		if ... then
@@ -171,6 +292,7 @@ local function newB(name, func, bench_time)
 		end
 		duration = 0
 		net_bytes = 0
+		bytes = 0
 	end
 
 	local function rungc()
@@ -190,9 +312,11 @@ local function newB(name, func, bench_time)
 	local function runN(self, n, dur)
 		fiber.self():set_joinable(true)
 		self.N = n
+		self.T = get_global_timeout()
 
-		if dur and fiber.extend_slice then
-			fiber.extend_slice({ err = 2*dur, warn = dur })
+		fiber.yield()
+		if dur and fiber.set_slice then
+			fiber.set_slice({ err = self.T, warn = math.max(dur, self.T / 2) })
 		end
 
 		rungc()
@@ -205,6 +329,15 @@ local function newB(name, func, bench_time)
 		self.prev_n = n
 		self.prev_duration = duration
 
+		local result = self:get_result() --[[@as luabench.R]]
+
+		table.insert(result.runs, {
+			net_bytes = net_bytes,
+			bytes = bytes,
+			duration = duration,
+			N = self.N,
+		})
+
 		if fiber.check_slice then
 			fiber.check_slice()
 		end
@@ -213,7 +346,7 @@ local function newB(name, func, bench_time)
 	---@param self luabench.B
 	---@return boolean should_continue
 	local function run1(self)
-		local fib = fiber.create(runN, self, 1)
+		local fib = fiber.create(runN, self, 1, get_global_timeout())
 		local r = { fib:join() }
 		local success = table.remove(r, 1)
 
@@ -249,48 +382,10 @@ local function newB(name, func, bench_time)
 		return true
 	end
 
-	---@param x number
-	---@param unit string
-	local function pretty(x, unit)
-		local y = math.abs(tonumber(x))
-
-		local format
-		if y == 0 or y >= 999.95 then
-			format = '%10.0f %s'
-		elseif y >= 99.995 then
-			format = '%12.1f %s'
-		elseif y >= 9.9995 then
-			format = '%13.2f %s'
-		elseif y >= 0.99995 then
-			format = '%14.3f %s'
-		elseif y >= 0.099995 then
-			format = '%15.4f %s'
-		elseif y >= 0.0099995 then
-			format = '%16.5f %s'
-		elseif y >= 0.00099995 then
-			format = '%17.6f %s'
-		else
-			format = '%18.7f %s'
-		end
-
-		return string.format(format, x, unit)
-	end
-
-	---@param b number
-	---@return string
-	local function pretty_mem(b)
-		local sign = b > 0 and "+" or ""
-		if b > 2^20 then
-			return ("%s%.2fMB"):format(sign, b / 2^20)
-		elseif b > 2^10 then
-			return ("%s%.2fKB"):format(sign, b / 2^10)
-		else
-			return ("%s%dB"):format(sign, b)
-		end
-	end
-
 	---@type luabench.R
-	local result = setmetatable({}, {
+	local result = setmetatable({
+		runs = {},
+	}, {
 		__tostring = function(self)
 			local t = {}
 
@@ -298,6 +393,10 @@ local function newB(name, func, bench_time)
 			if self.duration ~= 0 then
 				table.insert(t, pretty(tonumber(self.duration) / self.N, 'ns/op'))
 				table.insert(t, pretty(self.N*1e9 / tonumber(self.duration), 'op/s'))
+			end
+
+			if type(self.bytes) ~= 'number' then
+				self.bytes = 0
 			end
 
 			local mbs
@@ -317,9 +416,7 @@ local function newB(name, func, bench_time)
 		end,
 	})
 
-	local function get_result()
-		return result
-	end
+	local function get_result() return result end
 
 	---Runs given benchmark as sub-benchmark
 	---
@@ -369,7 +466,7 @@ local function newB(name, func, bench_time)
 	local function launch(self)
 		if bench_time.iters then
 			if bench_time.iters > 1 then
-				runN(self, bench_time.iters)
+				runN(self, bench_time.iters, get_global_timeout())
 			end
 		else
 			local d = bench_time.seconds*1e9
@@ -379,10 +476,14 @@ local function newB(name, func, bench_time)
 				local last = n
 				local prev_iters = self.N
 				local prev_ns = duration
-				-- print(duration, d, n, self.N)
+				-- print("duration:", duration, "need:", d, "required_n: ", n, "real_n:", self.N)
 
 				if prev_ns <= 0 then
 					prev_ns = 1
+				end
+
+				if prev_iters < n then
+					break
 				end
 
 				n = tonumber(goalns) / tonumber(prev_ns) * prev_iters
@@ -391,9 +492,10 @@ local function newB(name, func, bench_time)
 				n = max(n, last+1)
 				n = min(n, 1e9)
 
+				local dur = tonumber(prev_ns * (tonumber(n) / tonumber(prev_iters))) / 1e9
 				runN(self,
 					tonumber(n),
-					tonumber(prev_ns * (tonumber(n) / tonumber(prev_iters))) / 1e9
+					dur
 				)
 			end
 			-- print(duration, failed, d, n)
@@ -401,7 +503,7 @@ local function newB(name, func, bench_time)
 
 		result.N = self.N
 		result.duration = duration
-		result.bytes = bytes
+		result.bytes = self.bytes
 		result.net_bytes = net_bytes
 	end
 
@@ -446,6 +548,8 @@ local function newB(name, func, bench_time)
 		is_skipped = is_skipped,
 		set_bench_time = set_bench_time,
 
+		set_bytes = nil,
+
 		run = run,
 
 		-- private
@@ -458,6 +562,16 @@ local function newB(name, func, bench_time)
 		-- private
 		get_result = get_result,
 	}
+
+	function B.set_bytes(obj, b)
+		if obj == B then
+			bytes = b
+		elseif tonumber(obj) then
+			---@cast obj number
+			bytes = obj
+		end
+	end
+
 	return B
 end
 
@@ -659,6 +773,8 @@ local function run(args)
 		os.exit(1)
 	end
 
+	set_global_timeout(args.timeout)
+
 	-- print-out preambule
 	if not args.no_preambule then
 		local tarantool = require 'tarantool'
@@ -681,6 +797,7 @@ local function run(args)
 			args.duration.seconds and ("%ss"):format(args.duration.seconds)
 				or ("%s iters"):format(args.duration.iters)
 		)
+		log.warn("Global timeout: %s", args.timeout)
 	end
 
 	gbctx:set_bench_time(args.duration)
@@ -713,6 +830,61 @@ end
 
 local mod_name = ...
 if not mod_name or not mod_name:endswith("luabench") then
+	local defaults = {
+		timeout  = 60,
+		bmf      = false,
+		jit      = nil,
+		duration = '3s',
+		path     = '.',
+	}
+	local options = {
+		timeout  = os.getenv('LUABENCH_TIMEOUT'),
+		bmf      = os.getenv('LUABENCH_USE_BMF'),
+		jit      = os.getenv('LUABENCH_JIT'),
+		duration = os.getenv('LUABENCH_DURATION'),
+		path     = os.getenv('LUABENCH_PATH'),
+	}
+	local function merge(dst, src)
+		for k, v in pairs(src) do
+			if dst[k] == nil then dst[k] = v end
+		end
+		return dst
+	end
+	local function def(target)
+		if defaults[target] ~= nil then
+			return (' (default: %s)'):format(defaults[target])
+		else
+			return ''
+		end
+	end
+	local dotluabench do
+		dotluabench = {}
+		local cwd = fio.abspath('.')
+		repeat
+			local path = fio.pathjoin(cwd, '.luabench')
+			if fio.path.is_file(path) then
+				local fh = io.open(path, 'r')
+				if not fh then break end
+				local content = fh:read("*a")
+				local loader = loadstring(content, '.luabench')
+				if loader then
+					debug.setfenv(loader, dotluabench)
+					if not pcall(loader) then
+						dotluabench = {}
+					elseif dotluabench.path then
+						local dot_path = dotluabench.path:gsub('/+', '/'):gsub('/$', '')
+						local abs_path = fio.abspath(dot_path)
+						if abs_path ~= dot_path then
+							-- it is relative?
+							dotluabench.path = fio.pathjoin(cwd, dot_path)
+						end
+					end
+				end
+				break
+			end
+			cwd = fio.dirname(cwd)
+		until path == '/.luabench'
+	end
 	local parser = require 'argparse'()
 		:name "luabench"
 		:description "Runs lua code benchmarks"
@@ -726,39 +898,23 @@ if not mod_name or not mod_name:endswith("luabench") then
 		:description "Prints version"
 		:action(function() print("luabench " .. M._VERSION) os.exit(0) end)
 
+	parser:option "-t" "--timeout"
+		:target "timeout"
+		:description("global timeout"..def 'timeout')
+
 	parser:argument "path"
 		:target "path"
-		:args "1"
-		:default(".")
-		:description "Run benchmark from specified paths"
+		:args "0-1"
+		:description ("Run benchmark from specified paths"..def 'path')
 
 	parser:flag "--bmf"
 		:target "bmf"
-		:description "Reports benchmark in BMF format"
+		:description ("Reports benchmark in BMF format"..def 'bmf')
 
 	parser:option "-j"
 		:target "jit"
 		:args "1"
-		:description "Ons or Offs jit"
-		:action(function(_, _,opt)
-			if opt == 'on' then
-				jit.on()
-			elseif opt == 'off' then
-				jit.off()
-				jit.flush()
-				collectgarbage('collect')
-			end
-		end)
-
-	parser:flag "--memprof"
-		:target "run_memprof"
-		:hidden(true)
-		:description "run memory profile"
-
-	parser:flag "--sysprof"
-		:target "run_sysprof"
-		:hidden(true)
-		:description "run cpu profile"
+		:description ("Ons or Offs jit"..def 'jit')
 
 	parser:flag "--no-preambule"
 		:target "no_preambule"
@@ -769,73 +925,91 @@ if not mod_name or not mod_name:endswith("luabench") then
 
 	parser:option "-d"
 		:target "duration"
-		---@param x string
-		:convert(function(x)
-			local iters = x:match('^([0-9]+)x$')
-			if iters then
-				return { iters = tonumber(iters) }
+		:description ("test duration limit"..def 'duration')
+
+	local function convert_duration(x)
+		local iters = x:match('^([0-9]+)x$')
+		if iters then
+			return { iters = tonumber(iters) }
+		end
+
+		local units = {
+			ns = 1,
+			['µs'] = 1e3,
+			us = 1e3,
+			ms = 1e6,
+			s  = 1e9,
+			m  = 60*1e9,
+			h  = 24*60*1e9,
+		}
+
+		local len = #x
+		local pos = 1
+
+		local dur = 0ULL
+		while pos < len do
+			local s, f = string.find(x, '^[0-9]+', pos)
+			if not s then
+				return nil, ("malformed duration at position %d for %q"):format(pos, x)
 			end
 
-			local units = {
-				ns = 1,
-				['µs'] = 1e3,
-				us = 1e3,
-				ms = 1e6,
-				s  = 1e9,
-				m  = 60*1e9,
-				h  = 24*60*1e9,
-			}
+			local int = tonumber(x:sub(s, f))
+			local fract = 0
+			pos = f+1
 
-			local len = #x
-			local pos = 1
-
-			local dur = 0ULL
-			while pos < len do
-				local s, f = string.find(x, '^[0-9]+', pos)
-				if not s then
-					return nil, ("malformed duration at position %d for %q"):format(pos, x)
+			do
+				-- check fraction
+				local ds, df = x:find('^%.[0-9]+', pos)
+				if ds then
+					-- got fraction
+					fract = tonumber(x:sub(ds, df)) or 0
+					pos = df+1
 				end
-
-				local int = tonumber(x:sub(s, f))
-				local fract = 0
-				pos = f+1
-
-				do
-					-- check fraction
-					local ds, df = x:find('^%.[0-9]+', pos)
-					if ds then
-						-- got fraction
-						fract = tonumber(x:sub(ds, df)) or 0
-						pos = df+1
-					end
-				end
-
-				local us, uf = x:find('^[^0-9]+', pos)
-				if not us then
-					return nil, ("malformed duration: time unit not given at position %d for %q")
-						:format(pos, x)
-				end
-
-				local unit = x:sub(us, uf)
-				if not units[unit] then
-					return nil, ("malformed duration: unknown time unit given %q"):format(unit)
-				end
-				-- we can lose accuracy in this loop
-				dur = dur + (tonumber(int) + fract)*units[unit]
-				pos = uf+1
 			end
 
-			local seconds = tonumber(dur) / 1e9
-			return { seconds = tonumber(seconds) }
-		end)
-		:default({ seconds = 3 })
-		:description "test duration limit"
+			local us, uf = x:find('^[^0-9]+', pos)
+			if not us then
+				return nil, ("malformed duration: time unit not given at position %d for %q")
+					:format(pos, x)
+			end
+
+			local unit = x:sub(us, uf)
+			if not units[unit] then
+				return nil, ("malformed duration: unknown time unit given %q"):format(unit)
+			end
+			-- we can lose accuracy in this loop
+			dur = dur + (tonumber(int) + fract)*units[unit]
+			pos = uf+1
+		end
+
+		local seconds = tonumber(dur) / 1e9
+		return { seconds = tonumber(seconds) }
+	end
 
 	local args = parser:parse()
 	if args.description then
 		print(parser._description)
 		os.exit(0)
 	end
+
+	args = merge(args, options)
+	args = merge(args, dotluabench)
+	args = merge(args, defaults)
+
+	if args.jit then
+		local opt = args.jit
+		if opt == 'on' then
+			jit.on()
+		elseif opt == 'off' then
+			jit.off()
+			jit.flush()
+			collectgarbage('collect')
+		end
+	end
+	if type(args.duration) == 'string' then
+		args.duration = convert_duration(args.duration)
+	end
+
 	os.exit(run(args))
 end
 

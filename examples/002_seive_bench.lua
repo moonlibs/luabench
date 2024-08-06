@@ -3,8 +3,8 @@ local lb = require 'luabench'
 local M = {}
 
 local function make_seiver(limit)
+	local flags = table.new(limit, 0)
 	return function(b)
-		local flags = {}
 		for _ = 1, b.N do
 			local count = 0
 			table.clear(flags)

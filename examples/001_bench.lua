@@ -49,7 +49,7 @@ function M.bench_insert(b)
 	b:run("temporary-space", function(sb)
 		local temporary = box.space.temporary
 		local replace = temporary.replace
-		local tbl = {}
+		local tbl = table.new(2, 0)
 		for i = 1, sb.N do
 			tbl[1] = i%1000+1
 			tbl[2] = true
